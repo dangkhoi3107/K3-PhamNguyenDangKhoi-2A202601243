@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 import time
 
+from google.adk.models import LlmResponse
 from google.adk.plugins import base_plugin
 from google.genai import types
 
@@ -23,6 +24,12 @@ class RateLimitPlugin(base_plugin.BasePlugin):
         self.user_windows: dict[str, deque] = defaultdict(deque)
         self.blocked_count = 0
         self.total_count = 0
+        # See InputGuardrailPlugin in guardrails/input_guardrails.py:
+        # on_user_message_callback can't halt the runner in this ADK
+        # version — only before_model_callback's return value is checked
+        # to skip the model call. This carries the decision across (single
+        # request in flight per instance, so no cross-request race).
+        self._pending_block: types.Content | None = None
 
     def _block_response(self, message: str) -> types.Content:
         return types.Content(
@@ -37,13 +44,25 @@ class RateLimitPlugin(base_plugin.BasePlugin):
         now = time.time()
         window = self.user_windows[user_id]
 
-        # TODO: Implement sliding window:
-        # 1. Pop timestamps older than (now - window_seconds) from the left
-        # 2. If len(window) >= max_requests:
-        #       wait = window_seconds - (now - window[0])
-        #       self.blocked_count += 1
-        #       return self._block_response(
-        #           f"Rate limit exceeded. Try again in {wait:.0f}s."
-        #       )
-        # 3. Else: append now, return None
-        raise NotImplementedError("Implement RateLimitPlugin.on_user_message_callback")
+        while window and window[0] <= now - self.window_seconds:
+            window.popleft()
+
+        if len(window) >= self.max_requests:
+            wait = self.window_seconds - (now - window[0])
+            self.blocked_count += 1
+            self._pending_block = self._block_response(
+                f"Rate limit exceeded. Try again in {wait:.0f}s."
+            )
+            return self._pending_block
+
+        window.append(now)
+        self._pending_block = None
+        return None
+
+    async def before_model_callback(self, *, callback_context, llm_request):
+        """The actual hard gate — see InputGuardrailPlugin.before_model_callback
+        for why on_user_message_callback alone can't stop the model call."""
+        block, self._pending_block = self._pending_block, None
+        if block is None:
+            return None
+        return LlmResponse(content=block)

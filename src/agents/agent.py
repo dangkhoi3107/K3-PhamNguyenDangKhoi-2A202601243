@@ -1,10 +1,24 @@
 """
 Lab 11 — Agent Creation (Unsafe & Protected)
 """
+import os
+
 from google.adk.agents import llm_agent
 from google.adk import runners
 
 from core.utils import chat_with_agent
+
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
+OPENAI_MODEL = "openai/gpt-4o-mini"
+
+
+def _select_model():
+    """Use OpenAI (via LiteLLM) when OPENAI_API_KEY is set — e.g. Gemini
+    quota is exhausted — otherwise default to the lab's Gemini model."""
+    if os.environ.get("OPENAI_API_KEY"):
+        from google.adk.models.lite_llm import LiteLlm
+        return LiteLlm(model=OPENAI_MODEL)
+    return DEFAULT_MODEL
 
 
 def create_unsafe_agent():
@@ -14,7 +28,7 @@ def create_unsafe_agent():
     why guardrails are necessary.
     """
     agent = llm_agent.LlmAgent(
-        model="gemini-3.1-flash-lite",
+        model=_select_model(),
         name="unsafe_assistant",
         instruction="""You are a helpful customer service assistant for VinBank.
     You help customers with account inquiries, transactions, and general banking questions.
@@ -34,7 +48,7 @@ def create_protected_agent(plugins: list):
         plugins: List of BasePlugin instances (input + output guardrails)
     """
     agent = llm_agent.LlmAgent(
-        model="gemini-3.1-flash-lite",
+        model=_select_model(),
         name="protected_assistant",
         instruction="""You are a helpful customer service assistant for VinBank.
     You help customers with account inquiries, transactions, and general banking questions.

@@ -39,14 +39,20 @@ def content_filter(response: str) -> dict:
     issues = []
     redacted = response
 
-    # PII patterns to check
+    # PII patterns to check.
+    # Word-boundary anchors on "phone" and "national_id" stop a long VND amount
+    # (e.g. "50000000000") from matching as a substring of a 10-digit phone
+    # number. "national_id" also excludes runs ending in "000" — real CMND/CCCD
+    # numbers are effectively never round, but rounded transfer amounts are
+    # common and would otherwise be false-flagged. "password" requires the
+    # captured value to contain a digit so generic guidance like "password is
+    # required to change every 90 days" isn't redacted as if it were a secret.
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "phone": r"\b0\d{9,10}\b",
+        "email": r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}",
+        "national_id": r"\b\d{9}\b(?<!000)|\b\d{12}\b(?<!000)",
+        "api_key": r"sk-[a-zA-Z0-9-]+",
+        "password": r"password\s*(?:is|[:=])\s*[\w!@#$%^&*+.-]*\d[\w!@#$%^&*+.-]*",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -172,16 +178,27 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        filter_result = content_filter(response_text)
+        if not filter_result["safe"]:
+            self.redacted_count += 1
+            response_text = filter_result["redacted"]
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=response_text)],
+            )
 
-        return llm_response  # TODO: modify if needed
+        if self.use_llm_judge:
+            judge_result = await llm_safety_check(response_text)
+            if not judge_result["safe"]:
+                self.blocked_count += 1
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(
+                        text="Xin lỗi, tôi không thể cung cấp câu trả lời này vì lý do an toàn."
+                    )],
+                )
+
+        return llm_response
 
 
 # ============================================================

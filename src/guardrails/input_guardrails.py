@@ -5,8 +5,10 @@ Lab 11 — Part 2A: Input Guardrails
   TODO 3: Input Guardrail Plugin (ADK)
 """
 import re
+import unicodedata
 
 from google.genai import types
+from google.adk.models import LlmResponse
 from google.adk.plugins import base_plugin
 from google.adk.agents.invocation_context import InvocationContext
 
@@ -32,6 +34,27 @@ from core.config import ALLOWED_TOPICS, BLOCKED_TOPICS
 # Regex is one signal, not the whole security boundary.
 # ============================================================
 
+def _strip_diacritics(text: str) -> str:
+    """Fold Vietnamese diacritics to plain ASCII (lãi suất -> lai suat)."""
+    decomposed = unicodedata.normalize("NFD", text)
+    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return stripped.replace("đ", "d").replace("Đ", "D")
+
+
+def _normalize_text(text: str) -> str:
+    """Canonicalize text so obfuscated injections surface for regex matching.
+
+    - NFKC folds full-width / compatibility characters into plain ASCII.
+    - Stripping Unicode category "Cf" (format chars) removes zero-width
+      space/joiner/BOM tricks like "Ignore​ all previous instructions".
+    - Collapsing whitespace + lowercasing neutralizes spacing/case tricks.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    text = re.sub(r"\s+", " ", text)
+    return text.lower()
+
+
 def detect_injection(user_input: str) -> bool:
     """Detect prompt injection patterns in user input.
 
@@ -42,13 +65,20 @@ def detect_injection(user_input: str) -> bool:
         True if injection detected, False otherwise
     """
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        r"ignore\s+(all\s+)?(previous|above)\s+instructions",
+        r"you\s+are\s+now",
+        r"system\s+prompt",
+        r"reveal\s+your\s+(instructions|prompt)",
+        r"pretend\s+you\s+are",
+        r"act\s+as\s+(a\s+|an\s+)?unrestricted",
+        # Vietnamese equivalents (banking customers write in Vietnamese too).
+        r"bỏ\s+qua\s+(mọi\s+|tất\s+cả\s+)?hướng\s+dẫn",
+        r"tiết\s+lộ\s+(mật\s*khẩu|api|thông\s*tin\s*nội\s*bộ)",
     ]
 
+    normalized = _normalize_text(user_input)
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, normalized):
             return True
     return False
 
@@ -72,14 +102,19 @@ def topic_filter(user_input: str) -> bool:
     Returns:
         True if input should be BLOCKED (off-topic or blocked topic)
     """
-    input_lower = user_input.lower()
+    # ALLOWED_TOPICS/BLOCKED_TOPICS list Vietnamese keywords without diacritics
+    # (e.g. "lai suat", "tai khoan"); stripping accents from the input too
+    # means a real customer question like "Lãi suất tiết kiệm là bao nhiêu?"
+    # still matches instead of being blocked as "off-topic".
+    input_lower = _strip_diacritics(user_input.lower())
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return True
-    # 2. If input doesn't contain any allowed topic -> return True
-    # 3. Otherwise -> return False (allow)
+    if any(topic in input_lower for topic in BLOCKED_TOPICS):
+        return True
 
-    pass  # Replace with your implementation
+    if not any(topic in input_lower for topic in ALLOWED_TOPICS):
+        return True
+
+    return False
 
 
 # ============================================================
@@ -100,6 +135,16 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         super().__init__(name="input_guardrail")
         self.blocked_count = 0
         self.total_count = 0
+        # ADK's on_user_message_callback only "helps logging and modifying
+        # the user message" per its docstring — a Content return does NOT
+        # stop the LLM from being called (verified: before_run_callback's
+        # return value is also discarded by the runner). before_model_callback
+        # is the hook whose return value the flow actually checks to skip the
+        # model call (base_llm_flow._call_llm_with_tracing), so the real
+        # block happens there; this just carries the decision from one
+        # callback to the other (single request in flight per plugin
+        # instance, so no cross-request race).
+        self._pending_block: types.Content | None = None
 
     def _extract_text(self, content: types.Content) -> str:
         """Extract plain text from a Content object."""
@@ -132,14 +177,34 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 3. If both are False: return None (let message through)
+        if detect_injection(text):
+            self.blocked_count += 1
+            self._pending_block = self._block_response(
+                "Yêu cầu của bạn có dấu hiệu prompt injection và đã bị chặn."
+            )
+            return self._pending_block
 
-        pass  # Replace with your implementation
+        if topic_filter(text):
+            self.blocked_count += 1
+            self._pending_block = self._block_response(
+                "Xin lỗi, tôi chỉ hỗ trợ các câu hỏi liên quan đến dịch vụ ngân hàng."
+            )
+            return self._pending_block
+
+        self._pending_block = None
+        return None
+
+    async def before_model_callback(
+        self, *, callback_context, llm_request
+    ) -> LlmResponse | None:
+        """The actual hard gate: base_llm_flow skips the real model call and
+        yields this response directly when before_model_callback returns
+        non-None (see google/adk/flows/llm_flows/base_llm_flow.py,
+        _call_llm_with_tracing)."""
+        block, self._pending_block = self._pending_block, None
+        if block is None:
+            return None
+        return LlmResponse(content=block)
 
 
 # ============================================================
