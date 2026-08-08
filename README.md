@@ -2,9 +2,34 @@
 
 Làm sao để ứng dụng agent an toàn hơn?
 
+**Họ tên:** Phạm Nguyễn Đăng Khôi
+**MSSV:** 2A202601243
+
 **Hình thức:** bài tập **cá nhân** (1 người / 1 MSSV).
 
-**Đề bài duy nhất:** [`assignment11.md`](assignment11.md) · Cách nộp: [`SUBMISSION.md`](SUBMISSION.md)
+**Đề bài duy nhất:** [`assignment11.md`](assignment11.md) · Cách nộp: [`SUBMISSION.md`](SUBMISSION.md) · Báo cáo: [`report/2A202601243_report.md`](report/2A202601243_report.md)
+
+## Cách chạy
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+Copy-Item .env.example .env   # dán GOOGLE_API_KEY (hoặc OPENAI_API_KEY)
+pip install -r requirements.txt
+
+cd src
+python main.py --part 1   # Tấn công (unsafe + guards agent)
+python main.py --part 2   # Guardrails
+python main.py --part 3   # Testing pipeline
+python main.py --part 4   # HITL design
+python main.py --part 5   # Suite phòng thủ đầy đủ → outputs/*.json
+
+# Demo UI (so sánh Unsafe vs Protected agent)
+cd ..
+streamlit run app.py
+```
+
+Tự kiểm: `pytest tests/smoke -q && pytest tests/public -q`
 
 ---
 
